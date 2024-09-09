@@ -1,0 +1,11 @@
+[package]
+name = "first-person-adventure"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.14.0"
+bevy_fps_controller = "0.3.0"
+bevy_mod_picking = { version = "0.20.0", features = ["backend_raycast"] }
+rand = "0.8.5"
+bevy_rapier3d = "0.27"
