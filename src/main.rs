@@ -1,10 +1,14 @@
+use backend::HitData;
 use bevy::prelude::*;
 use bevy_fps_controller::controller::*;
+use bevy_mod_picking::backend::PointerHits;
 use bevy_mod_picking::backends::raycast::RaycastBackend;
 use bevy_mod_picking::picking_core::PickingPluginsSettings;
 use bevy_mod_picking::prelude::*;
 use bevy_rapier3d::prelude::*;
 use rand::Rng;
+
+use bevy::window::CursorGrabMode;
 
 fn main() {
     App::new()
@@ -18,13 +22,74 @@ fn main() {
             ..default()
         })
         .add_plugins(DefaultPickingPlugins)
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, setup_obstacle_course, setup_reticle))
         .add_systems(Update, (change_object_color, update_fps_camera))
+        .add_systems(Update, manage_cursor)
         .run();
 }
 
 #[derive(Component)]
 struct ClickableObject;
+
+fn setup_obstacle_course(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // Pillars
+    for i in 0..5 {
+        let x = i as f32 * 3.0 - 6.0;
+        commands.spawn((
+            PbrBundle {
+                mesh: meshes.add(Cuboid::new(0.5, 2.0 + i as f32 * 0.5, 0.5)),
+                material: materials.add(Color::srgb(0.6, 0.6, 0.6)),
+                transform: Transform::from_xyz(x, (2.0 + i as f32 * 0.5) / 2.0, -5.0),
+                ..default()
+            },
+            Collider::cuboid(0.25, 1.0 + i as f32 * 0.25, 0.25),
+        ));
+    }
+
+    // Ramps
+    let ramp_sizes = [(5.0, 1.0), (5.0, 2.0), (5.0, 3.0)];
+    for (i, (length, height)) in ramp_sizes.iter().enumerate() {
+        let x = i as f32 * 6.0 - 6.0;
+        commands.spawn((
+            PbrBundle {
+                mesh: meshes.add(Cuboid::new(*length, *height, 2.0)),
+                material: materials.add(Color::srgb(0.7, 0.5, 0.3)),
+                transform: Transform::from_xyz(x, height / 2.0, 5.0)
+                    .with_rotation(Quat::from_rotation_z(-f32::atan2(*height, *length))),
+                ..default()
+            },
+            Collider::cuboid(length / 2.0, height / 2.0, 1.0),
+        ));
+    }
+
+    // Bridge
+    commands.spawn((
+        PbrBundle {
+            mesh: meshes.add(Cuboid::new(10.0, 0.2, 2.0)),
+            material: materials.add(Color::srgb(0.4, 0.4, 0.4)),
+            transform: Transform::from_xyz(0.0, 3.0, 10.0),
+            ..default()
+        },
+        Collider::cuboid(5.0, 0.1, 1.0),
+    ));
+
+    // Bridge supports
+    for x in [-5.0, 5.0] {
+        commands.spawn((
+            PbrBundle {
+                mesh: meshes.add(Cuboid::new(0.5, 3.0, 0.5)),
+                material: materials.add(Color::srgb(0.4, 0.4, 0.4)),
+                transform: Transform::from_xyz(x, 1.5, 10.0),
+                ..default()
+            },
+            Collider::cuboid(0.25, 1.5, 0.25),
+        ));
+    }
+}
 
 fn setup(
     mut commands: Commands,
@@ -99,7 +164,7 @@ fn setup(
             FpsController {
                 walk_speed: 10.0,
                 run_speed: 20.0,
-                jump_speed: 6.0,
+                jump_speed: 20.0,
                 //gravity: -9.81,
                 ..default()
             },
@@ -111,6 +176,31 @@ fn setup(
 
     // Camera
     commands.spawn((Camera3dBundle::default(), RenderPlayer { logical_entity }));
+}
+
+#[derive(Component)]
+struct Reticle;
+
+#[derive(Component)]
+struct IgnoreRaycast;
+
+fn setup_reticle(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Px(4.0),
+                height: Val::Px(4.0),
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                ..default()
+            },
+            background_color: Color::rgba(1.0, 1.0, 1.0, 0.5).into(),
+            ..default()
+        },
+        Reticle,
+        Pickable::IGNORE, // This will make the reticle ignore picking,
+    ));
 }
 
 fn change_object_color(
@@ -140,5 +230,26 @@ fn update_fps_camera(
         (logical_query.get_single(), render_query.get_single_mut())
     {
         camera_config.height_offset = fps_controller.height;
+    }
+}
+
+fn manage_cursor(
+    mut windows: Query<&mut Window>,
+    btn: Res<ButtonInput<MouseButton>>,
+    key: Res<ButtonInput<KeyCode>>,
+) {
+    let mut window = windows.single_mut();
+
+    if btn.just_pressed(MouseButton::Left) {
+        window.cursor.grab_mode = CursorGrabMode::Locked;
+        window.cursor.visible = false;
+        // Center the cursor
+        let center = Vec2::new(window.width() / 2.0, window.height() / 2.0);
+        window.set_cursor_position(Some(center));
+    }
+
+    if key.just_pressed(KeyCode::Escape) {
+        window.cursor.grab_mode = CursorGrabMode::None;
+        window.cursor.visible = true;
     }
 }
