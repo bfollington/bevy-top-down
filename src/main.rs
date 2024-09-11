@@ -1,93 +1,53 @@
-use backend::HitData;
 use bevy::prelude::*;
-use bevy_fps_controller::controller::*;
-use bevy_mod_picking::backend::PointerHits;
-use bevy_mod_picking::backends::raycast::RaycastBackend;
-use bevy_mod_picking::picking_core::PickingPluginsSettings;
-use bevy_mod_picking::prelude::*;
+use bevy::window::PrimaryWindow;
 use bevy_rapier3d::prelude::*;
-use rand::Rng;
-
-use bevy::window::CursorGrabMode;
+use bevy_tnua::builtins::TnuaBuiltinDash;
+use bevy_tnua::prelude::*;
+use bevy_tnua_rapier3d::*;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
-        .add_plugins(FpsControllerPlugin)
-        .add_plugins(RapierDebugRenderPlugin::default())
-        .insert_resource(PickingPluginsSettings {
-            is_input_enabled: true,
-            is_focus_enabled: true,
-            ..default()
-        })
-        .add_plugins(DefaultPickingPlugins)
-        .add_systems(Startup, (setup, setup_obstacle_course, setup_reticle))
-        .add_systems(Update, (change_object_color, update_fps_camera))
-        .add_systems(Update, manage_cursor)
+        .add_plugins((
+            DefaultPlugins,
+            RapierPhysicsPlugin::<NoUserData>::default(),
+            TnuaControllerPlugin::default(),
+            TnuaRapier3dPlugin::default(),
+        ))
+        .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (player_movement, player_aim, jetpack_recharge).in_set(TnuaUserControlsSystemSet),
+        )
+        .add_systems(Update, (spawn_bullets, update_bullets))
         .run();
 }
 
 #[derive(Component)]
-struct ClickableObject;
+struct Player;
 
-fn setup_obstacle_course(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // Pillars
-    for i in 0..5 {
-        let x = i as f32 * 3.0 - 6.0;
-        commands.spawn((
-            PbrBundle {
-                mesh: meshes.add(Cuboid::new(0.5, 2.0 + i as f32 * 0.5, 0.5)),
-                material: materials.add(Color::srgb(0.6, 0.6, 0.6)),
-                transform: Transform::from_xyz(x, (2.0 + i as f32 * 0.5) / 2.0, -5.0),
-                ..default()
-            },
-            Collider::cuboid(0.25, 1.0 + i as f32 * 0.25, 0.25),
-        ));
-    }
+#[derive(Component)]
+struct Jetpack {
+    fuel: f32,
+    max_fuel: f32,
+    is_active: bool,
+    last_used: f32,
+}
 
-    // Ramps
-    let ramp_sizes = [(5.0, 1.0), (5.0, 2.0), (5.0, 3.0)];
-    for (i, (length, height)) in ramp_sizes.iter().enumerate() {
-        let x = i as f32 * 6.0 - 6.0;
-        commands.spawn((
-            PbrBundle {
-                mesh: meshes.add(Cuboid::new(*length, *height, 2.0)),
-                material: materials.add(Color::srgb(0.7, 0.5, 0.3)),
-                transform: Transform::from_xyz(x, height / 2.0, 5.0)
-                    .with_rotation(Quat::from_rotation_z(-f32::atan2(*height, *length))),
-                ..default()
-            },
-            Collider::cuboid(length / 2.0, height / 2.0, 1.0),
-        ));
-    }
+#[derive(Component)]
+pub struct Bullet {
+    pub lifetime: Timer,
+    pub speed: f32,
+    pub direction: Vec3,
+}
 
-    // Bridge
-    commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(Cuboid::new(10.0, 0.2, 2.0)),
-            material: materials.add(Color::srgb(0.4, 0.4, 0.4)),
-            transform: Transform::from_xyz(0.0, 3.0, 10.0),
-            ..default()
-        },
-        Collider::cuboid(5.0, 0.1, 1.0),
-    ));
-
-    // Bridge supports
-    for x in [-5.0, 5.0] {
-        commands.spawn((
-            PbrBundle {
-                mesh: meshes.add(Cuboid::new(0.5, 3.0, 0.5)),
-                material: materials.add(Color::srgb(0.4, 0.4, 0.4)),
-                transform: Transform::from_xyz(x, 1.5, 10.0),
-                ..default()
-            },
-            Collider::cuboid(0.25, 1.5, 0.25),
-        ));
+impl Default for Jetpack {
+    fn default() -> Self {
+        Self {
+            fuel: 2.0,
+            max_fuel: 2.0,
+            is_active: false,
+            last_used: 0.0,
+        }
     }
 }
 
@@ -96,6 +56,12 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Camera
+    commands.spawn(Camera3dBundle {
+        transform: Transform::from_xyz(0.0, 20.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
+
     // Light
     commands.spawn(PointLightBundle {
         point_light: PointLight {
@@ -107,149 +73,233 @@ fn setup(
         ..default()
     });
 
-    // Floor
+    // Ground
     commands.spawn((
         PbrBundle {
-            mesh: meshes.add(Plane3d::default().mesh().size(50.0, 50.0)),
-            material: materials.add(Color::srgb(0.3, 0.5, 0.3)),
-            transform: Transform::from_xyz(0.0, 0.0, 0.0),
+            mesh: meshes.add(Plane3d::new(
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec2::new(50.0, 50.0),
+            )),
+            material: materials.add(Color::rgb(0.3, 0.5, 0.3)),
             ..default()
         },
-        Collider::cuboid(25.0, 0.1, 25.0), // Add a collider to the floor
-        PickableBundle::default(),
+        RigidBody::Fixed,
+        Collider::cuboid(25.0, 0.1, 25.0),
     ));
 
-    // Clickable objects
-    for i in 0..5 {
-        let position = Vec3::new(i as f32 * 2.0 - 4.0, 0.5, 0.0);
+    // Ambient light
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 1000.0,
+    });
+
+    // Additional light
+    commands.spawn(PointLightBundle {
+        point_light: PointLight {
+            intensity: 10000.0,
+            radius: 100.0,
+            range: 100.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        transform: Transform::from_xyz(0.0, 8.0, 0.0),
+        ..default()
+    });
+
+    // Obstacles
+    let obstacle_positions = [
+        (Vec3::new(5.0, 0.5, 5.0), Vec3::new(2.0, 1.0, 2.0)),
+        (Vec3::new(-5.0, 1.0, -5.0), Vec3::new(3.0, 2.0, 3.0)),
+        (Vec3::new(0.0, 0.75, -8.0), Vec3::new(4.0, 1.5, 2.0)),
+        (Vec3::new(8.0, 0.5, 0.0), Vec3::new(2.0, 1.0, 4.0)),
+    ];
+    let obstacle_colors = [
+        Color::rgb(0.8, 0.2, 0.2),
+        Color::rgb(0.2, 0.8, 0.2),
+        Color::rgb(0.2, 0.2, 0.8),
+        Color::rgb(0.8, 0.8, 0.2),
+    ];
+
+    for ((position, size), color) in obstacle_positions.iter().zip(obstacle_colors.iter()) {
         commands.spawn((
             PbrBundle {
-                mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-                material: materials.add(Color::srgb(0.8, 0.7, 0.6)),
-                transform: Transform::from_translation(position),
+                mesh: meshes.add(Cuboid::new(size.x, size.y, size.z)),
+                material: materials.add(*color),
+                transform: Transform::from_translation(*position),
                 ..default()
             },
-            Collider::cuboid(0.5, 0.5, 0.5), // Add colliders to the objects
-            PickableBundle::default(),
-            ClickableObject,
+            RigidBody::Fixed,
+            Collider::cuboid(size.x / 2.0, size.y / 2.0, size.z / 2.0),
         ));
     }
 
-    // FPS Controller
-    let logical_entity = commands
-        .spawn((
-            TransformBundle::from_transform(Transform::from_xyz(0.0, 5.0, 5.0)),
-            Collider::cylinder(3.0 / 2.0, 0.5),
-            ActiveEvents::COLLISION_EVENTS,
-            LockedAxes::ROTATION_LOCKED,
-            AdditionalMassProperties::Mass(1.0),
-            Velocity::zero(),
-            RigidBody::Dynamic,
-            Ccd { enabled: true },
-            GravityScale(1.0), // Enable gravity
-            Friction {
-                coefficient: 0.5,
-                combine_rule: CoefficientCombineRule::Average,
-            },
-            Restitution {
-                coefficient: 0.0,
-                combine_rule: CoefficientCombineRule::Min,
-            },
-            LogicalPlayer,
-            FpsControllerInput {
-                pitch: -std::f32::consts::FRAC_PI_8,
-                yaw: std::f32::consts::FRAC_PI_4,
-                ..default()
-            },
-            FpsController {
-                walk_speed: 10.0,
-                run_speed: 20.0,
-                jump_speed: 20.0,
-                //gravity: -9.81,
-                ..default()
-            },
-        ))
-        .insert(CameraConfig {
-            height_offset: 0.6, // Adjust this to change the camera height
-        })
-        .id();
-
-    // Camera
-    commands.spawn((Camera3dBundle::default(), RenderPlayer { logical_entity }));
-}
-
-#[derive(Component)]
-struct Reticle;
-
-#[derive(Component)]
-struct IgnoreRaycast;
-
-fn setup_reticle(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // Player
     commands.spawn((
-        NodeBundle {
-            style: Style {
-                width: Val::Px(4.0),
-                height: Val::Px(4.0),
-                position_type: PositionType::Absolute,
-                left: Val::Percent(50.0),
-                top: Val::Percent(50.0),
-                ..default()
-            },
-            background_color: Color::rgba(1.0, 1.0, 1.0, 0.5).into(),
+        PbrBundle {
+            mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+            material: materials.add(Color::rgb(0.8, 0.2, 0.3)),
+            transform: Transform::from_xyz(0.0, 0.5, 0.0),
             ..default()
         },
-        Reticle,
-        Pickable::IGNORE, // This will make the reticle ignore picking,
+        Player,
+        RigidBody::Dynamic,
+        Collider::cylinder(0.5, 0.5),
+        TnuaControllerBundle::default(),
+        TnuaRapier3dIOBundle::default(),
+        LockedAxes::ROTATION_LOCKED,
+        Jetpack::default(),
     ));
 }
 
-fn change_object_color(
-    mut events: EventReader<Pointer<Click>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut clickable_objects: Query<(&Handle<StandardMaterial>, &mut ClickableObject)>,
+fn player_movement(
+    time: Res<Time>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut query: Query<(&mut TnuaController, &mut Jetpack), With<Player>>,
 ) {
-    let mut rng = rand::thread_rng();
-    for event in events.read() {
-        if let Ok((material_handle, _)) = clickable_objects.get_mut(event.target) {
-            if let Some(material) = materials.get_mut(material_handle) {
-                material.base_color = Color::srgb(
-                    rng.gen_range(0.0..1.0),
-                    rng.gen_range(0.0..1.0),
-                    rng.gen_range(0.0..1.0),
-                );
-            }
+    let mut direction = Vec3::ZERO;
+    if keyboard_input.pressed(KeyCode::KeyW) {
+        direction.z -= 1.0;
+    }
+    if keyboard_input.pressed(KeyCode::KeyS) {
+        direction.z += 1.0;
+    }
+    if keyboard_input.pressed(KeyCode::KeyA) {
+        direction.x -= 1.0;
+    }
+    if keyboard_input.pressed(KeyCode::KeyD) {
+        direction.x += 1.0;
+    }
+
+    if let Ok((mut controller, mut jetpack)) = query.get_single_mut() {
+        let jetpack_active = keyboard_input.pressed(KeyCode::Space) && jetpack.fuel > 0.0;
+
+        if jetpack_active {
+            jetpack.is_active = true;
+            jetpack.fuel = (jetpack.fuel - time.delta_seconds()).max(0.0);
+            jetpack.last_used = time.elapsed_seconds();
+
+            let jetpack_direction = if direction != Vec3::ZERO {
+                direction.normalize()
+            } else {
+                Vec3::Y
+            };
+
+            controller.action(TnuaBuiltinDash {
+                allow_in_air: true,
+                desired_forward: jetpack_direction,
+                speed: 10.0,
+                displacement: jetpack_direction * 5.0,
+                ..default()
+            });
+        } else {
+            jetpack.is_active = false;
+            controller.basis(TnuaBuiltinWalk {
+                desired_velocity: direction.normalize_or_zero() * 5.0,
+                float_height: 1.0,
+                ..default()
+            });
         }
     }
 }
 
-fn update_fps_camera(
-    logical_query: Query<(&Transform, &FpsController), With<LogicalPlayer>>,
-    mut render_query: Query<&mut CameraConfig, With<RenderPlayer>>,
+fn player_aim(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut player_query: Query<&mut Transform, With<Player>>,
 ) {
-    if let (Ok((logical_transform, fps_controller)), Ok(mut camera_config)) =
-        (logical_query.get_single(), render_query.get_single_mut())
+    let (camera, camera_transform) = camera_query.single();
+    let window = windows.single();
+
+    if let Some(cursor_position) = window
+        .cursor_position()
+        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
+        .map(|ray| {
+            ray.origin + ray.direction * (camera_transform.translation().y / ray.direction.y)
+        })
     {
-        camera_config.height_offset = fps_controller.height;
+        if let Ok(mut player_transform) = player_query.get_single_mut() {
+            let mut direction = (cursor_position - player_transform.translation).normalize();
+            direction.y = 0.0; // Lock the direction to the XZ plane
+            direction = direction.normalize(); // Re-normalize after removing Y component
+            let current_position = player_transform.translation;
+            player_transform.look_at(current_position + direction, Vec3::Y);
+        }
     }
 }
 
-fn manage_cursor(
-    mut windows: Query<&mut Window>,
-    btn: Res<ButtonInput<MouseButton>>,
-    key: Res<ButtonInput<KeyCode>>,
-) {
-    let mut window = windows.single_mut();
-
-    if btn.just_pressed(MouseButton::Left) {
-        window.cursor.grab_mode = CursorGrabMode::Locked;
-        window.cursor.visible = false;
-        // Center the cursor
-        let center = Vec2::new(window.width() / 2.0, window.height() / 2.0);
-        window.set_cursor_position(Some(center));
+fn jetpack_recharge(time: Res<Time>, mut query: Query<&mut Jetpack>) {
+    for mut jetpack in query.iter_mut() {
+        if !jetpack.is_active && time.elapsed_seconds() - jetpack.last_used > 2.0 {
+            jetpack.fuel = (jetpack.fuel + time.delta_seconds()).min(jetpack.max_fuel);
+        }
     }
+}
+fn spawn_bullets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    player_query: Query<&Transform, With<Player>>,
+) {
+    let (camera, camera_transform) = camera_query.single();
+    let player_transform = player_query.single();
+    let window = windows.single();
 
-    if key.just_pressed(KeyCode::Escape) {
-        window.cursor.grab_mode = CursorGrabMode::None;
-        window.cursor.visible = true;
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        if let Some(world_pos) = window
+            .cursor_position()
+            .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
+            .map(|ray| {
+                ray.origin + ray.direction * (camera_transform.translation().y / ray.direction.y)
+            })
+        {
+            let mut direction = (world_pos - player_transform.translation).normalize();
+            direction.y = 0.0; // Lock the direction to the XZ plane
+            direction = direction.normalize(); // Re-normalize after removing Y component
+
+            println!(
+                "Spawning bullet at: {:?}, direction: {:?}",
+                player_transform.translation, direction
+            );
+
+            commands.spawn((
+                MaterialMeshBundle {
+                    mesh: meshes.add(Mesh::from(Sphere {
+                        radius: 0.1, // Adjust this value to change bullet size
+                    })),
+                    material: materials.add(StandardMaterial {
+                        base_color: LinearRgba::RED.into(),
+                        ..default()
+                    }),
+                    transform: Transform::from_translation(player_transform.translation)
+                        .looking_at(player_transform.translation + direction, Vec3::Y),
+                    ..default()
+                },
+                Bullet {
+                    lifetime: Timer::from_seconds(3.0, TimerMode::Once),
+                    speed: 20.0,
+                    direction,
+                },
+            ));
+        }
+    }
+}
+
+fn update_bullets(
+    mut commands: Commands,
+    mut bullet_query: Query<(Entity, &mut Transform, &mut Bullet)>,
+    time: Res<Time>,
+) {
+    for (entity, mut transform, mut bullet) in bullet_query.iter_mut() {
+        bullet.lifetime.tick(time.delta());
+
+        if bullet.lifetime.finished() {
+            commands.entity(entity).despawn();
+        } else {
+            let movement = transform.forward() * bullet.speed * time.delta_seconds();
+            transform.translation += movement;
+        }
     }
 }
